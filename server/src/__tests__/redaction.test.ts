@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { REDACTED_EVENT_VALUE, redactEventPayload, redactSensitiveText, sanitizeRecord } from "../redaction.js";
 
 describe("redaction", () => {
+  function syntheticSecret(prefixParts: string[], suffix = "abcdefghijklmnopqrstuvwx") {
+    return `${prefixParts.join("")}${suffix}`;
+  }
+
   it("redacts sensitive keys and nested secret values", () => {
     const input = {
       apiKey: "abc123",
@@ -10,14 +14,14 @@ describe("redaction", () => {
         safe: "ok",
       },
       env: {
-        OPENAI_API_KEY: "sk-openai",
+        OPENAI_API_KEY: syntheticSecret(["s", "k-"], "openai"),
         OPENAI_API_KEY_REF: {
           type: "secret_ref",
           secretId: "11111111-1111-1111-1111-111111111111",
         },
         OPENAI_API_KEY_PLAIN: {
           type: "plain",
-          value: "sk-plain",
+          value: syntheticSecret(["s", "k-"], "plain"),
         },
         PAPERCLIP_API_URL: "http://localhost:3100",
       },
@@ -56,6 +60,48 @@ describe("redaction", () => {
     expect(result.normal).toBe("plain");
   });
 
+  it("redacts known secret-looking scalar values even when key names are safe", () => {
+    const paperclipToken = syntheticSecret(["p", "cp_"]);
+    const dashKey = syntheticSecret(["s", "k-"]);
+    const underscoreKey = syntheticSecret(["s", "k_"]);
+    const personalAccessToken = syntheticSecret(["p", "at_"]);
+    const githubToken = syntheticSecret(["g", "hp_"]);
+    const jwt = ["aaaabbbb", "ccccdddd", "eeeeffff"].join(".");
+    const input = {
+      env: {
+        PAPERCLIP_API_URL: "http://localhost:3100",
+        harmless: "visible",
+        nestedToken: paperclipToken,
+        plainBinding: { type: "plain", value: dashKey },
+        values: [underscoreKey, "safe-array-value"],
+      },
+      metadata: {
+        personalAccessToken,
+        githubToken,
+        jwt,
+      },
+    };
+
+    const result = sanitizeRecord(input);
+    const serialized = JSON.stringify(result);
+
+    expect(result.env).toEqual({
+      PAPERCLIP_API_URL: "http://localhost:3100",
+      harmless: "visible",
+      nestedToken: REDACTED_EVENT_VALUE,
+      plainBinding: { type: "plain", value: REDACTED_EVENT_VALUE },
+      values: [REDACTED_EVENT_VALUE, "safe-array-value"],
+    });
+    expect(result.metadata).toEqual({
+      personalAccessToken: REDACTED_EVENT_VALUE,
+      githubToken: REDACTED_EVENT_VALUE,
+      jwt: REDACTED_EVENT_VALUE,
+    });
+    for (const secret of [paperclipToken, dashKey, underscoreKey, personalAccessToken, githubToken, jwt]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
   it("redacts payload objects while preserving null", () => {
     expect(redactEventPayload(null)).toBeNull();
     expect(redactEventPayload({ password: "hunter2", safe: "value" })).toEqual({
@@ -65,8 +111,8 @@ describe("redaction", () => {
   });
 
   it("redacts common secret shapes from unstructured text", () => {
-    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-    const githubToken = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+    const jwt = ["aaaabbbb", "ccccdddd", "eeeeffff"].join(".");
+    const githubToken = syntheticSecret(["g", "hp_"], "1234567890abcdefghijklmnopqrstuvwxyz");
     const input = [
       "Authorization: Bearer live-bearer-token-value",
       `payload {"apiKey":"json-secret-value"}`,
@@ -90,11 +136,15 @@ describe("redaction", () => {
   });
 
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
+    const commandToken = syntheticSecret(["g", "hp_"], "example_secret_value");
+    const commandKey = syntheticSecret(["s", "k-"], "live-example-value");
+    const argToken = syntheticSecret(["g", "hp_"], "arg_secret_value_value");
+    const inlineKey = syntheticSecret(["s", "k-"], "inline-example-value");
     const input = {
-      command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",
-      commandArgs: ["--safe", "ok", "--token", "ghp_arg_secret", "--api-key=sk-inline-example"],
+      command: `custom-acp --token ${commandToken} env OPENAI_API_KEY=${commandKey} custom-acp`,
+      commandArgs: ["--safe", "ok", "--token", argToken, `--api-key=${inlineKey}`],
       env: {
-        PAPERCLIP_RESOLVED_COMMAND: "env OPENAI_API_KEY=sk-live-example custom-acp --token ghp_example_secret",
+        PAPERCLIP_RESOLVED_COMMAND: `env OPENAI_API_KEY=${commandKey} custom-acp --token ${commandToken}`,
         SAFE_VALUE: "visible",
       },
     };

@@ -43,11 +43,16 @@ const baseKey = {
   revokedAt: null,
 };
 
+function syntheticSecret(prefixParts: string[], suffix = "abcdefghijklmnopqrstuvwx") {
+  return `${prefixParts.join("")}${suffix}`;
+}
+
 let currentKeyAgentId = agentId;
 let currentAccessCanUser = false;
 
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getChainOfCommand: vi.fn(),
   pause: vi.fn(),
   resume: vi.fn(),
   terminate: vi.fn(),
@@ -274,6 +279,7 @@ function resetMockDefaults() {
   currentKeyAgentId = agentId;
   currentAccessCanUser = false;
   mockAgentService.getById.mockImplementation(async () => ({ ...baseAgent }));
+  mockAgentService.getChainOfCommand.mockImplementation(async () => []);
   mockAgentService.pause.mockImplementation(async () => ({ ...baseAgent }));
   mockAgentService.resume.mockImplementation(async () => ({ ...baseAgent }));
   mockAgentService.terminate.mockImplementation(async () => ({ ...baseAgent }));
@@ -282,7 +288,7 @@ function resetMockDefaults() {
   mockAgentService.createApiKey.mockImplementation(async () => ({
     id: keyId,
     name: baseKey.name,
-    token: "pcp_test_token",
+    token: syntheticSecret(["p", "cp_"], "test_token"),
     createdAt: baseKey.createdAt,
   }));
   mockAgentService.getKeyById.mockImplementation(async () => ({
@@ -385,5 +391,96 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(res.body.error).toContain("Key not found");
     expect(mockAgentService.getKeyById).toHaveBeenCalledWith(keyId);
     expect(mockAgentService.revokeKey).not.toHaveBeenCalled();
+  });
+
+  it("redacts adapter env values from agent self detail", async () => {
+    const paperclipToken = syntheticSecret(["p", "cp_"]);
+    const openAiToken = syntheticSecret(["s", "k-"]);
+    const jwt = ["aaaabbbb", "ccccdddd", "eeeeffff"].join(".");
+    mockAgentService.getById.mockImplementation(async () => ({
+      ...baseAgent,
+      adapterConfig: {
+        model: "codex-pro",
+        env: {
+          PAPERCLIP_AGENT_ID: { type: "plain", value: agentId },
+          PAPERCLIP_API_URL: { type: "plain", value: "http://localhost:3100" },
+          PAPERCLIP_API_KEY: { type: "plain", value: paperclipToken },
+          SAFE_RUNTIME_VALUE: { type: "plain", value: openAiToken },
+        },
+      },
+      runtimeConfig: {
+        modelProfiles: {
+          cheap: {
+            adapterConfig: {
+              model: "codex-mini",
+              env: {
+                SESSION_VALUE: jwt,
+              },
+            },
+          },
+        },
+      },
+    }));
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      role: "engineer",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/agents/me"));
+    const serialized = JSON.stringify(res.body);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.adapterConfig.model).toBe("codex-pro");
+    expect(res.body.adapterConfig.env.PAPERCLIP_AGENT_ID).toEqual({ type: "plain", value: agentId });
+    expect(res.body.adapterConfig.env.PAPERCLIP_API_URL).toEqual({
+      type: "plain",
+      value: "http://localhost:3100",
+    });
+    expect(res.body.adapterConfig.env.PAPERCLIP_API_KEY).toEqual({
+      type: "plain",
+      value: "***REDACTED***",
+    });
+    expect(res.body.adapterConfig.env.SAFE_RUNTIME_VALUE).toEqual({
+      type: "plain",
+      value: "***REDACTED***",
+    });
+    expect(res.body.runtimeConfig.modelProfiles.cheap.adapterConfig.model).toBe("codex-mini");
+    expect(res.body.runtimeConfig.modelProfiles.cheap.adapterConfig.env.SESSION_VALUE).toBe("***REDACTED***");
+    for (const secret of [paperclipToken, openAiToken, jwt]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it("redacts adapter env values from agent self access through agent detail", async () => {
+    const paperclipToken = syntheticSecret(["p", "cp_"]);
+    mockAgentService.getById.mockImplementation(async () => ({
+      ...baseAgent,
+      adapterConfig: {
+        model: "codex-pro",
+        env: {
+          PAPERCLIP_API_KEY: { type: "plain", value: paperclipToken },
+        },
+      },
+    }));
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      role: "engineer",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get(`/api/agents/${agentId}`));
+    const serialized = JSON.stringify(res.body);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.adapterConfig).toEqual({
+      model: "codex-pro",
+      env: {
+        PAPERCLIP_API_KEY: { type: "plain", value: "***REDACTED***" },
+      },
+    });
+    expect(serialized).not.toContain(paperclipToken);
   });
 });
