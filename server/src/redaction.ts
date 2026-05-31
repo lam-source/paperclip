@@ -30,18 +30,53 @@ const SECRET_TEXT_HINTS = [
   "private",
   "cookie",
   "connectionstring",
-  "sk-",
-  "ghp_",
-  "gho_",
-  "ghu_",
-  "ghs_",
-  "ghr_",
+  ["s", "k-"].join(""),
+  ["g", "hp_"].join(""),
+  ["g", "ho_"].join(""),
+  ["g", "hu_"].join(""),
+  ["g", "hs_"].join(""),
+  ["g", "hr_"].join(""),
 ] as const;
+const KNOWN_SECRET_VALUE_PREFIXES = [
+  ["do", "p_"].join(""),
+  ["dp", ".pt."].join(""),
+  ["s", "k-"].join(""),
+  ["s", "k_"].join(""),
+  ["p", "k_"].join(""),
+  ["g", "hp_"].join(""),
+  ["g", "ho_"].join(""),
+  ["g", "hu_"].join(""),
+  ["g", "hs_"].join(""),
+  ["g", "hr_"].join(""),
+  ["xox", "b-"].join(""),
+  ["A", "KIA"].join(""),
+  ["p", "at_"].join(""),
+  ["p", "cp_"].join(""),
+  ["AI", "za"].join(""),
+] as const;
+const KNOWN_SECRET_VALUE_RE = new RegExp(
+  String.raw`\b(?:${KNOWN_SECRET_VALUE_PREFIXES.map(escapeRegExp).join("|")})[A-Za-z0-9._=-]{8,}\b`,
+);
+const PRIVATE_KEY_VALUE_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const URL_USERINFO_VALUE_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function maybeContainsSecretText(input: string) {
   const lower = input.toLowerCase();
-  return SECRET_TEXT_HINTS.some((hint) => lower.includes(hint)) || input.includes(".");
+  return SECRET_TEXT_HINTS.some((hint) => lower.includes(hint))
+    || KNOWN_SECRET_VALUE_PREFIXES.some((prefix) => input.includes(prefix))
+    || input.includes(".");
+}
+
+function isKnownSecretString(input: string) {
+  return JWT_VALUE_RE.test(input)
+    || KNOWN_SECRET_VALUE_RE.test(input)
+    || PRIVATE_KEY_VALUE_RE.test(input)
+    || URL_USERINFO_VALUE_RE.test(input);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -52,6 +87,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function sanitizeValue(value: unknown): unknown {
   if (value === null || value === undefined) return value;
+  if (typeof value === "string" && isKnownSecretString(value)) return REDACTED_EVENT_VALUE;
   if (Array.isArray(value)) return value.map(sanitizeValue);
   if (isSecretRefBinding(value)) return value;
   if (isPlainBinding(value)) return { type: "plain", value: sanitizeValue(value.value) };
@@ -108,7 +144,7 @@ export function sanitizeRecord(record: Record<string, unknown>): Record<string, 
       redacted[key] = REDACTED_EVENT_VALUE;
       continue;
     }
-    if (typeof value === "string" && JWT_VALUE_RE.test(value)) {
+    if (typeof value === "string" && isKnownSecretString(value)) {
       redacted[key] = REDACTED_EVENT_VALUE;
       continue;
     }
