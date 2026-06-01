@@ -2,7 +2,16 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, agents, authUsers, companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import {
+  agentApiKeys,
+  agents,
+  authUsers,
+  companies,
+  companyMemberships,
+  heartbeatRuns,
+  instanceUserRoles,
+} from "@paperclipai/db";
+import { parseLocalAgentRunApiToken } from "@paperclipai/adapter-utils";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
@@ -106,6 +115,16 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    const localRunTokenRunId = parseLocalAgentRunApiToken(token);
+    if (localRunTokenRunId) {
+      const actor = await resolveLocalAgentRunTokenActor(db, req, localRunTokenRunId, runIdHeader ?? null);
+      if (actor) {
+        req.actor = actor;
+        next();
+        return;
+      }
+    }
+
     const boardKey = await boardAuth.findBoardApiKeyByToken(token);
     if (boardKey) {
       const access = await boardAuth.resolveBoardAccess(boardKey.userId);
@@ -196,6 +215,53 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     };
 
     next();
+  };
+}
+
+function isLoopbackRequest(req: Request) {
+  const address = req.socket.remoteAddress ?? "";
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+async function resolveLocalAgentRunTokenActor(
+  db: Db,
+  req: Request,
+  tokenRunId: string,
+  runIdHeader: string | null,
+): Promise<Express.Request["actor"] | null> {
+  if (!isLoopbackRequest(req)) return null;
+  if (runIdHeader && runIdHeader !== tokenRunId) return null;
+
+  const run = await db
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      status: heartbeatRuns.status,
+      finishedAt: heartbeatRuns.finishedAt,
+    })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, tokenRunId))
+    .then((rows) => rows[0] ?? null);
+
+  if (!run || run.status !== "running" || run.finishedAt) return null;
+
+  const agentRecord = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, run.agentId))
+    .then((rows) => rows[0] ?? null);
+
+  if (!agentRecord || agentRecord.companyId !== run.companyId) return null;
+  if (agentRecord.status === "terminated" || agentRecord.status === "pending_approval") return null;
+
+  return {
+    type: "agent",
+    agentId: run.agentId,
+    companyId: run.companyId,
+    keyId: undefined,
+    runId: tokenRunId,
+    source: "agent_run_token",
   };
 }
 

@@ -10,6 +10,7 @@ async function writeFakeCodexCommand(commandPath: string): Promise<void> {
 const fs = require("node:fs");
 
 const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const shellSnapshotPath = process.env.PAPERCLIP_TEST_SHELL_SNAPSHOT_PATH;
 const payload = {
   argv: process.argv.slice(2),
   prompt: fs.readFileSync(0, "utf8"),
@@ -17,6 +18,7 @@ const payload = {
   paperclipWakePayloadJson: process.env.PAPERCLIP_WAKE_PAYLOAD_JSON || null,
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
+  paperclipRunId: process.env.PAPERCLIP_RUN_ID || null,
   paperclipApiBridgeMode: process.env.PAPERCLIP_API_BRIDGE_MODE || null,
   paperclipEnvKeys: Object.keys(process.env)
     .filter((key) => key.startsWith("PAPERCLIP_"))
@@ -24,6 +26,13 @@ const payload = {
 };
 if (capturePath) {
   fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
+}
+if (shellSnapshotPath) {
+  fs.writeFileSync(
+    shellSnapshotPath,
+    "export PAPERCLIP_API_KEY=" + JSON.stringify(process.env.PAPERCLIP_API_KEY || "") + "\\n",
+    "utf8",
+  );
 }
 console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-session-1" }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hello" } }));
@@ -49,6 +58,7 @@ type CapturePayload = {
   paperclipWakePayloadJson: string | null;
   paperclipApiUrl?: string | null;
   paperclipApiKey?: string | null;
+  paperclipRunId?: string | null;
   paperclipApiBridgeMode?: string | null;
   paperclipEnvKeys: string[];
 };
@@ -57,6 +67,17 @@ type LogEntry = {
   stream: "stdout" | "stderr";
   chunk: string;
 };
+
+const JWT_SHAPED_VALUE_RE = /[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+
+function createSyntheticJwt(): string {
+  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  return [
+    encode({ alg: "HS256", typ: "JWT" }),
+    encode({ sub: "agent-1", run_id: "run-jwt-snapshot" }),
+    "synthetic-signature",
+  ].join(".");
+}
 
 function createLocalSandboxRunner() {
   let counter = 0;
@@ -187,6 +208,68 @@ describe("codex execute", () => {
       else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps JWT-shaped run auth tokens out of Codex shell snapshot env", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-run-token-snapshot-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const shellSnapshotPath = path.join(root, "shell-snapshot.sh");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+    const runId = "123e4567-e89b-42d3-a456-426614174000";
+    const rawRunJwt = createSyntheticJwt();
+    expect(rawRunJwt).toMatch(JWT_SHAPED_VALUE_RE);
+
+    try {
+      const result = await execute({
+        runId,
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            PAPERCLIP_TEST_SHELL_SNAPSHOT_PATH: shellSnapshotPath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: rawRunJwt,
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      const shellSnapshot = await fs.readFile(shellSnapshotPath, "utf8");
+      expect(capture.paperclipApiKey).toBe(`pcr_${runId}`);
+      expect(capture.paperclipApiKey).not.toBe(rawRunJwt);
+      expect(capture.paperclipRunId).toBe(runId);
+      expect(shellSnapshot).not.toContain(rawRunJwt);
+      expect(shellSnapshot).not.toMatch(JWT_SHAPED_VALUE_RE);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
   });

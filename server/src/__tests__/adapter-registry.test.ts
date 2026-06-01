@@ -307,7 +307,7 @@ describe("server adapter registry", () => {
     expect(detectModel).toHaveBeenCalledTimes(1);
   });
 
-  it("injects the local agent JWT and Paperclip API auth guidance into Hermes", async () => {
+  it("injects the local agent run API handle and Paperclip API auth guidance into Hermes", async () => {
     const adapter = requireServerAdapter("hermes_local");
 
     await adapter.execute({
@@ -337,9 +337,9 @@ describe("server adapter registry", () => {
     expect(hermesExecuteMock).toHaveBeenCalledTimes(1);
     const [patchedCtx] = hermesExecuteMock.mock.calls[0];
     expect(patchedCtx.agent.adapterConfig).toMatchObject({
-      env: {
-        OPENAI_API_KEY: "llm-token",
-        PAPERCLIP_API_KEY: "agent-run-jwt",
+        env: {
+          OPENAI_API_KEY: "llm-token",
+        PAPERCLIP_API_KEY: "pcr_run-123",
         PAPERCLIP_RUN_ID: "run-123",
       },
     });
@@ -382,7 +382,7 @@ describe("server adapter registry", () => {
     const [patchedCtx] = hermesExecuteMock.mock.calls[0];
     expect(patchedCtx.config.hermesCommand).toBe("runtime-hermes");
     expect(patchedCtx.agent.adapterConfig.hermesCommand).toBe("agent-hermes");
-    expect(patchedCtx.agent.adapterConfig.env.PAPERCLIP_API_KEY).toBe("agent-run-jwt");
+    expect(patchedCtx.agent.adapterConfig.env.PAPERCLIP_API_KEY).toBe("pcr_run-123");
   });
 
   it("passes the original Hermes context through when authToken is absent", async () => {
@@ -477,8 +477,8 @@ describe("server adapter registry", () => {
     const [patchedCtx] = hermesExecuteMock.mock.calls[0];
     // promptTemplate must remain unset so Hermes uses its built-in heartbeat/task prompt.
     expect(patchedCtx.agent.adapterConfig.promptTemplate).toBeUndefined();
-    // Auth token is still injected.
-    expect(patchedCtx.agent.adapterConfig.env.PAPERCLIP_API_KEY).toBe("agent-run-jwt");
+    // Auth handle is still injected.
+    expect(patchedCtx.agent.adapterConfig.env.PAPERCLIP_API_KEY).toBe("pcr_run-123");
   });
 });
 
