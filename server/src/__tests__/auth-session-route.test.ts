@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLocalAgentRunApiToken } from "@paperclipai/adapter-utils";
 import { actorMiddleware } from "../middleware/auth.js";
 
 function createSelectChain(rows: unknown[]) {
@@ -63,6 +64,60 @@ describe("actorMiddleware authenticated session profile", () => {
       companyIds: [],
       memberships: [],
       isInstanceAdmin: false,
+    });
+  });
+
+  it("resolves loopback local-agent run API handles without requiring a raw run JWT", async () => {
+    const runId = "123e4567-e89b-42d3-a456-426614174000";
+    const companyId = "223e4567-e89b-42d3-a456-426614174000";
+    const agentId = "323e4567-e89b-42d3-a456-426614174000";
+    const db = {
+      select: vi
+        .fn()
+        .mockImplementationOnce(() =>
+          createSelectChain([
+            {
+              id: runId,
+              companyId,
+              agentId,
+              status: "running",
+              finishedAt: null,
+            },
+          ]),
+        )
+        .mockImplementationOnce(() =>
+          createSelectChain([
+            {
+              id: agentId,
+              companyId,
+              status: "active",
+            },
+          ]),
+        ),
+    } as any;
+    const app = express();
+    app.use(
+      actorMiddleware(db, {
+        deploymentMode: "authenticated",
+        resolveSession: async () => null,
+      }),
+    );
+    app.get("/actor", (req, res) => {
+      res.json(req.actor);
+    });
+
+    const res = await request(app)
+      .get("/actor")
+      .set("Authorization", `Bearer ${createLocalAgentRunApiToken(runId)}`)
+      .set("X-Paperclip-Run-Id", runId);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      type: "agent",
+      agentId,
+      companyId,
+      runId,
+      source: "agent_run_token",
     });
   });
 

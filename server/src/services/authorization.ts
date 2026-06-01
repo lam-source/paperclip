@@ -25,6 +25,7 @@ export type AuthorizationActor =
       | "board_key"
       | "agent_key"
       | "agent_jwt"
+      | "agent_run_token"
       | "cloud_tenant"
       | "none";
   };

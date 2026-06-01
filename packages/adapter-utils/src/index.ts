@@ -60,6 +60,10 @@ export {
   REDACTED_COMMAND_TEXT_VALUE,
   redactCommandText,
 } from "./command-redaction.js";
+export {
+  createLocalAgentRunApiToken,
+  parseLocalAgentRunApiToken,
+} from "./local-agent-run-token.js";
 export { buildSandboxNpmInstallCommand } from "./sandbox-install-command.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.

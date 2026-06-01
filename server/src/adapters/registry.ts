@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import {
   buildSandboxNpmInstallCommand,
+  createLocalAgentRunApiToken,
   getAdapterSessionManagement,
 } from "@paperclipai/adapter-utils";
 import {
@@ -463,7 +464,7 @@ const hermesLocalAdapter: ServerAdapterModule = {
       ...existingConfig,
       env: {
         ...existingEnv,
-        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: normalizedCtx.authToken } : {}),
+        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: createLocalAgentRunApiToken(normalizedCtx.runId) } : {}),
         PAPERCLIP_RUN_ID: normalizedCtx.runId,
       },
     };

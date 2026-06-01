@@ -48,6 +48,7 @@ import {
   routines,
   workspaceOperations,
 } from "@paperclipai/db";
+import { createLocalAgentRunApiToken } from "@paperclipai/adapter-utils";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -60,7 +61,6 @@ import type {
   AdapterSessionCodec,
   UsageSummary,
 } from "../adapters/index.js";
-import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -7869,19 +7869,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const adapter = getServerAdapter(agent.adapterType);
       const authToken = adapter.supportsLocalAgentJwt
-        ? createLocalAgentJwt(agent.id, agent.companyId, agent.adapterType, run.id)
+        ? createLocalAgentRunApiToken(run.id)
         : null;
-      if (adapter.supportsLocalAgentJwt && !authToken) {
-        logger.warn(
-          {
-            companyId: agent.companyId,
-            agentId: agent.id,
-            runId: run.id,
-            adapterType: agent.adapterType,
-          },
-          "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
-        );
-      }
       const adapterResult = await adapter.execute({
         runId: run.id,
         agent,
