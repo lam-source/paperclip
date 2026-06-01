@@ -1,0 +1,168 @@
+name: GitHub Actions baseline audit
+
+on:
+  schedule:
+    - cron: "29 6 * * 1"
+  pull_request:
+    paths:
+      - ".github/**"
+      - ".pinact.yaml"
+      - "scripts/security/gha-baseline-check.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: |
+            api.github.com:443
+            github.com:443
+            nodejs.org:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: "24"
+
+      - name: Install pinact
+        run: |
+          set -euo pipefail
+          PINACT_VERSION="3.10.1"
+          PINACT_SHA256="c5234ff3a636cda47719c73ca33a0183a5f441581455eda8a0726e5030942b69"
+          PINACT_TARBALL="${RUNNER_TEMP}/pinact_linux_amd64.tar.gz"
+          curl -sSfL "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_amd64.tar.gz" -o "${PINACT_TARBALL}"
+          echo "${PINACT_SHA256}  ${PINACT_TARBALL}" | sha256sum -c -
+          tar -xzf "${PINACT_TARBALL}" -C "${RUNNER_TEMP}" pinact
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+
+      - name: Install zizmor
+        run: |
+          python -m pip install --user zizmor==1.25.2
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Run pinact
+        id: pinact
+        continue-on-error: true
+        run: find .github/workflows \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 pinact run --check
+
+      - name: Run zizmor
+        id: zizmor
+        continue-on-error: true
+        run: zizmor --format=sarif .github/workflows > zizmor.sarif
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run repository baseline API checks
+        id: baseline
+        continue-on-error: true
+        run: node --no-warnings=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/security/gha-baseline-check.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHA_BASELINE_ADMIN_TOKEN: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && secrets.GHA_BASELINE_ADMIN_TOKEN || '' }}
+          GHA_BASELINE_ADMIN_ENFORCEMENT: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          GHA_BASELINE_R14_EXCEPTION: ${{ vars.GHA_BASELINE_R14_EXCEPTION }}
+          EXPECTED_GBRAIN_BASELINE_SHA: ${{ vars.GHA_BASELINE_EXPECTED_SHA }}
+          CURRENT_GBRAIN_BASELINE_SHA: ${{ vars.GHA_BASELINE_CURRENT_SHA }}
+
+      - name: Write drift report
+        if: always()
+        run: |
+          set -euo pipefail
+          pinact_outcome="${{ steps.pinact.outcome }}"
+          zizmor_outcome="${{ steps.zizmor.outcome }}"
+          baseline_outcome="${{ steps.baseline.outcome }}"
+
+          {
+            echo "# GitHub Actions baseline drift report"
+            echo
+            echo "- pinact: ${pinact_outcome}"
+            echo "- zizmor: ${zizmor_outcome}"
+            echo "- repository baseline API checks: ${baseline_outcome}"
+            echo "- AIVA-1670 baseline SHA comparison: configured only when GHA_BASELINE_EXPECTED_SHA and GHA_BASELINE_CURRENT_SHA repository variables are present"
+            echo
+            if [ -f gha-baseline-check.json ]; then
+              echo "## API checks"
+              node -e 'const r=require("./gha-baseline-check.json"); for (const c of r.checks) console.log(`- ${c.status.toUpperCase()} ${c.id}: ${c.title} — ${c.message}`)'
+            fi
+          } | tee gha-baseline-report.md
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const failed = [
+            ["pinact", process.env.PINACT_OUTCOME],
+            ["zizmor", process.env.ZIZMOR_OUTCOME],
+            ["baseline", process.env.BASELINE_OUTCOME],
+          ].filter(([, outcome]) => outcome !== "success");
+          fs.writeFileSync("gha-baseline-drift.json", `${JSON.stringify({ ok: failed.length === 0, failed }, null, 2)}\n`);
+          NODE
+        env:
+          PINACT_OUTCOME: ${{ steps.pinact.outcome }}
+          ZIZMOR_OUTCOME: ${{ steps.zizmor.outcome }}
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+
+      - name: Upload SARIF and drift report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gha-baseline-audit
+          path: |
+            gha-baseline-check.sarif
+            gha-baseline-check.json
+            zizmor.sarif
+            gha-baseline-report.md
+            gha-baseline-drift.json
+          if-no-files-found: warn
+
+      - name: Open scheduled drift issue
+        if: always() && github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          if node -e 'process.exit(require("./gha-baseline-drift.json").ok ? 0 : 1)'; then
+            echo "No scheduled baseline drift detected."
+            exit 0
+          fi
+
+          existing_issue="$(
+            gh issue list \
+              --state open \
+              --search "GitHub Actions baseline drift detected in:title" \
+              --json number,url \
+              --jq '.[0].number // empty'
+          )"
+
+          if [ -n "${existing_issue}" ]; then
+            gh issue comment "${existing_issue}" --body-file gha-baseline-report.md
+            exit 0
+          fi
+
+          gh issue create \
+            --title "GitHub Actions baseline drift detected" \
+            --body-file gha-baseline-report.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Enforce baseline
+        if: always()
+        run: node -e 'const r=require("./gha-baseline-drift.json"); if (!r.ok) { console.error(JSON.stringify(r.failed)); process.exit(1); }'
