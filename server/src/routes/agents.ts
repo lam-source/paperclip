@@ -520,15 +520,21 @@ export function agentRoutes(
 
   async function buildAgentDetail(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
-    options?: { restricted?: boolean },
+    options?: { restricted?: boolean; redactSensitiveConfig?: boolean },
   ) {
     const [chainOfCommand, accessState] = await Promise.all([
       svc.getChainOfCommand(agent.id),
       buildAgentAccessState(agent),
     ]);
 
+    const agentView = options?.restricted
+      ? redactForRestrictedAgentView(agent)
+      : options?.redactSensitiveConfig
+        ? redactAgentSensitiveConfiguration(agent)
+        : agent;
+
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
+      ...agentView,
       chainOfCommand,
       access: accessState,
     };
@@ -1267,9 +1273,24 @@ export function agentRoutes(
   function redactForRestrictedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
     if (!agent) return null;
     return {
-      ...agent,
+      ...redactAgentSensitiveConfiguration(agent),
       adapterConfig: {},
       runtimeConfig: {},
+    };
+  }
+
+  function redactAgentMetadata(agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
+    return typeof agent.metadata === "object" && agent.metadata !== null && !Array.isArray(agent.metadata)
+      ? redactEventPayload(agent.metadata as Record<string, unknown>)
+      : agent.metadata ?? null;
+  }
+
+  function redactAgentSensitiveConfiguration(agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
+    return {
+      ...agent,
+      adapterConfig: redactEventPayload(agent.adapterConfig),
+      runtimeConfig: redactEventPayload(agent.runtimeConfig),
+      metadata: redactAgentMetadata(agent),
     };
   }
 
@@ -1727,7 +1748,7 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    res.json(await buildAgentDetail(agent));
+    res.json(await buildAgentDetail(agent, { redactSensitiveConfig: true }));
   });
 
   router.get("/agents/me/inbox-lite", async (req, res) => {
@@ -1797,9 +1818,11 @@ export function agentRoutes(
     }
     assertCompanyAccess(req, agent.companyId);
     const isSelf = req.actor.type === "agent" && req.actor.agentId === id;
-    const canReadSensitiveDetail = isSelf
-      ? true
-      : await actorCanReadConfigurationsForCompany(req, agent.companyId);
+    if (isSelf) {
+      res.json(await buildAgentDetail(agent, { redactSensitiveConfig: true }));
+      return;
+    }
+    const canReadSensitiveDetail = await actorCanReadConfigurationsForCompany(req, agent.companyId);
     if (!canReadSensitiveDetail) {
       res.json(await buildAgentDetail(agent, { restricted: true }));
       return;

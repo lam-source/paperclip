@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
+import { REDACTED_EVENT_VALUE } from "../redaction.js";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -37,6 +38,39 @@ const baseAgent = {
   createdAt: new Date("2026-03-19T00:00:00.000Z"),
   updatedAt: new Date("2026-03-19T00:00:00.000Z"),
 };
+
+const secretPrefixFixtures = {
+  paperclip: ["pc", "p_", "paperclip-fixture"].join(""),
+  jwt: [
+    ["ey", "J", "hbGciOiJIUzI1NiJ9"].join(""),
+    ["ey", "J", "zdWIiOiJwYXBlcmNsaXAiLCJpc3MiOiJ0ZXN0In0"].join(""),
+    "signature",
+  ].join("."),
+  openai: ["sk", "_", "openai-fixture"].join(""),
+  personalAccess: ["pa", "t_", "personal-fixture"].join(""),
+  github: ["gh", "p_", "github-fixture"].join(""),
+  doppler: ["do", "p_", "doppler-fixture"].join(""),
+};
+
+const secretPrefixPattern = new RegExp(
+  [
+    ["pc", "p_"].join(""),
+    ["ey", "J"].join(""),
+    ["sk", "_"].join(""),
+    ["pa", "t_"].join(""),
+    ["gh", "p_"].join(""),
+    ["do", "p_"].join(""),
+  ].join("|"),
+);
+
+function findSecretPrefixMatches(value: unknown): string[] {
+  if (typeof value === "string") {
+    return secretPrefixPattern.test(value) ? [value] : [];
+  }
+  if (Array.isArray(value)) return value.flatMap(findSecretPrefixMatches);
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value as Record<string, unknown>).flatMap(findSecretPrefixMatches);
+}
 
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -433,6 +467,79 @@ describe.sequential("agent permission routes", () => {
         runtimeConfig: {},
       }),
     ]);
+  });
+
+  it("redacts secret-bearing configuration from agent-authenticated self view", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterConfig: {
+        command: "codex",
+        env: {
+          PAPERCLIP_API_KEY: { type: "plain", value: secretPrefixFixtures.paperclip },
+          SESSION_JWT: secretPrefixFixtures.jwt,
+          OPENAI_API_KEY: secretPrefixFixtures.openai,
+          PERSONAL_ACCESS_TOKEN: secretPrefixFixtures.personalAccess,
+          GITHUB_TOKEN: secretPrefixFixtures.github,
+          DOPPLER_TOKEN: secretPrefixFixtures.doppler,
+          PAPERCLIP_API_URL: "http://localhost:3100",
+        },
+      },
+      runtimeConfig: {
+        modelProfiles: {
+          cheap: {
+            adapterConfig: {
+              env: {
+                PAPERCLIP_API_KEY: { type: "plain", value: secretPrefixFixtures.paperclip },
+              },
+            },
+          },
+        },
+      },
+      metadata: {
+        accessToken: secretPrefixFixtures.personalAccess,
+        label: "safe metadata",
+      },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/agents/me"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.adapterConfig.command).toBe("codex");
+    expect(res.body.adapterConfig.env.PAPERCLIP_API_KEY).toEqual({
+      type: "plain",
+      value: REDACTED_EVENT_VALUE,
+    });
+    expect(res.body.adapterConfig.env.PAPERCLIP_API_URL).toBe("http://localhost:3100");
+    expect(res.body.runtimeConfig.modelProfiles.cheap.adapterConfig.env.PAPERCLIP_API_KEY).toEqual({
+      type: "plain",
+      value: REDACTED_EVENT_VALUE,
+    });
+    expect(res.body.metadata).toEqual({
+      accessToken: REDACTED_EVENT_VALUE,
+      label: "safe metadata",
+    });
+    expect(findSecretPrefixMatches(res.body.adapterConfig.env)).toEqual([]);
+    expect(findSecretPrefixMatches(res.body.runtimeConfig)).toEqual([]);
+    expect(findSecretPrefixMatches(res.body.metadata)).toEqual([]);
+
+    const byIdRes = await requestApp(app, (baseUrl) => request(baseUrl).get(`/api/agents/${agentId}`));
+
+    expect(byIdRes.status, JSON.stringify(byIdRes.body)).toBe(200);
+    expect(byIdRes.body.adapterConfig.env.PAPERCLIP_API_KEY).toEqual({
+      type: "plain",
+      value: REDACTED_EVENT_VALUE,
+    });
+    expect(findSecretPrefixMatches(byIdRes.body.adapterConfig.env)).toEqual([]);
+    expect(findSecretPrefixMatches(byIdRes.body.runtimeConfig)).toEqual([]);
+    expect(findSecretPrefixMatches(byIdRes.body.metadata)).toEqual([]);
   });
 
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
